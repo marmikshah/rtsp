@@ -1,11 +1,67 @@
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 
 mod handler;
 mod protocol;
+mod session;
 
-use handler::handle_request;
+use handler::RequestHandler;
 use protocol::parse_request;
+
+fn handle_connection(stream: TcpStream) {
+    let peer_addr = stream.peer_addr().unwrap();
+    println!("Client Connected: {}", peer_addr);
+
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+    let mut handler = RequestHandler::new();
+
+    loop {
+        let mut request_text = String::new();
+
+        loop {
+            let mut line = String::new();
+
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    // Connection closed
+                    println!("Client disconnected: {}", peer_addr);
+                    return;
+                }
+                Ok(_) => {
+                    request_text.push_str(&line);
+
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("Read error: {}", e);
+                    return;
+                }
+            }
+        }
+
+        println!(">>> Received:\n{}", request_text);
+
+        match parse_request(&request_text) {
+            Ok(request) => {
+                let response = handler.handle(&request);
+                let response_bytes = response.serialize();
+
+                println!("<<< Sending:\n{}", response_bytes);
+
+                if let Err(e) = writer.write_all(response_bytes.as_bytes()) {
+                    println!("Write error: {}", e);
+                    return;
+                }
+            }
+            Err(e) => {
+                println!("Parse error: {:?}", e);
+            }
+        }
+    }
+}
 
 fn main() {
     let listener = TcpListener::bind("0.0.0.0:8554").expect("Failed to bind to port");
@@ -13,30 +69,10 @@ fn main() {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut connection) => {
-                println!("Client connected: {}", connection.peer_addr().unwrap());
-
-                let mut buffer = [0u8; 1024];
-                match connection.read(&mut buffer) {
-                    Ok(bytes_read) => {
-                        let raw_request = String::from_utf8_lossy(&buffer[..bytes_read]);
-
-                        match parse_request(&raw_request) {
-                            Ok(request) => {
-                                let response = handle_request(&request);
-                                let response_bytes = response.serialize();
-
-                                println!("<<< Sending:\n{}", response_bytes);
-
-                                if let Err(e) = connection.write_all(response_bytes.as_bytes()) {
-                                    println!("Failed to send response: {}", e);
-                                }
-                            }
-                            Err(e) => println!("Parse error: {:?}", e),
-                        }
-                    }
-                    Err(e) => println!("Failed to read: {}", e),
-                }
+            Ok(connection) => {
+                std::thread::spawn(move || {
+                    handle_connection(connection);
+                });
             }
             Err(e) => println!("Connection failed: {}", e),
         }
